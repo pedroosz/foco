@@ -31,9 +31,15 @@ const titusExclusiveThreshold = 256 << 10
 // The scanner is safe for concurrent use. Scans are admitted through a
 // CPU-weighted semaphore (see scanWeight) so concurrent scans keep the CPUs
 // busy without starving any regex toward Titus's per-match timeout.
+//
+// Loading the rules (~20ms of YAML parsing plus matcher compilation) runs in
+// the background from NewTitus, so cheaper engines in the union can answer
+// first; the first Titus scan waits for it.
 type Titus struct {
 	mu      sync.RWMutex
 	scanner *titusRules
+	loadErr error
+	loaded  chan struct{}
 	closed  bool
 	cpu     *cpuSlots
 	slots   int
@@ -76,16 +82,31 @@ func (c *cpuSlots) release(n int) {
 // NewTitus returns a Titus engine over the builtin Titus rules.
 // Noisy rules are excluded, matching the default behaviour of `titus scan`.
 func NewTitus() (*Titus, error) {
-	rules, err := rule.NewLoader().LoadBuiltinRules()
-	if err != nil {
-		return nil, fmt.Errorf("detect: loading titus rules: %w", err)
-	}
-	scanner, err := newTitusRules(rule.FilterNoisy(rules, false), prefilterTitusRules)
-	if err != nil {
-		return nil, err
-	}
 	slots := max(1, runtime.GOMAXPROCS(0))
-	return &Titus{scanner: scanner, cpu: newCPUSlots(slots), slots: slots}, nil
+	t := &Titus{cpu: newCPUSlots(slots), slots: slots, loaded: make(chan struct{})}
+	go func() {
+		defer close(t.loaded)
+		rules, err := rule.NewLoader().LoadBuiltinRules()
+		if err != nil {
+			t.loadErr = fmt.Errorf("detect: loading titus rules: %w", err)
+			return
+		}
+		t.scanner, t.loadErr = newTitusRules(rule.FilterNoisy(rules, false), prefilterTitusRules)
+	}()
+	return t, nil
+}
+
+// ready waits for the rules to load.
+func (t *Titus) ready(ctx context.Context) (*titusRules, error) {
+	select {
+	case <-t.loaded:
+	case <-ctx.Done():
+		return nil, ctx.Err()
+	}
+	if t.loadErr != nil {
+		return nil, t.loadErr
+	}
+	return t.scanner, nil
 }
 
 // DetectPath reports whether path contains content the scanner treats as sensitive.
@@ -93,8 +114,8 @@ func (t *Titus) DetectPath(ctx context.Context, path string) (bool, error) {
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	if t.scanner == nil {
-		return false, fmt.Errorf("detect: titus scanner is not initialized")
+	if _, err := t.ready(ctx); err != nil {
+		return false, err
 	}
 	data, err := os.ReadFile(path)
 	if err != nil {
@@ -107,8 +128,9 @@ func (t *Titus) DetectContent(ctx context.Context, _ string, content []byte) (bo
 	if err := ctx.Err(); err != nil {
 		return false, err
 	}
-	if t.scanner == nil {
-		return false, fmt.Errorf("detect: titus scanner is not initialized")
+	scanner, err := t.ready(ctx)
+	if err != nil {
+		return false, err
 	}
 	weight := scanWeight(len(content), t.slots)
 	if err := t.cpu.acquire(ctx, weight); err != nil {
@@ -123,7 +145,7 @@ func (t *Titus) DetectContent(ctx context.Context, _ string, content []byte) (bo
 	if t.closed {
 		return false, errors.New("detect: engine closed")
 	}
-	return t.scanner.match(content)
+	return scanner.match(content)
 }
 
 func scanWeight(size, slots int) int {
@@ -139,6 +161,7 @@ func scanWeight(size, slots int) int {
 
 // Close releases the underlying scanner. Additional calls are no-ops.
 func (t *Titus) Close() error {
+	<-t.loaded
 	t.mu.Lock()
 	defer t.mu.Unlock()
 	if t.closed || t.scanner == nil {

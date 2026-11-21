@@ -12,26 +12,33 @@ import (
 )
 
 // Betterleaks scans with a pool of betterleaks detectors. Building a detector
-// compiles its rules (~10ms each) and mutates the shared config, so the pool
-// is built sequentially in the background, before any scan can use it; the
-// search meanwhile starts listing and Titus-scanning files.
+// compiles its rules (~10ms) and mutates its config, so each detector gets its
+// own config and they are built in the background, one at a time; each joins
+// the pool as soon as it is built, so the first scan waits for one detector,
+// not for the whole pool.
 type Betterleaks struct {
-	pool  chan *detect.Detector
-	ready chan struct{}
+	pool chan *detect.Detector
 }
 
 func NewBetterleaks(workers int) (*Betterleaks, error) {
 	if workers < 1 {
 		workers = 1
 	}
-	cfg, err := config.Default()
+	first, err := config.Default()
 	if err != nil {
 		return nil, err
 	}
-	b := &Betterleaks{pool: make(chan *detect.Detector, workers), ready: make(chan struct{})}
+	b := &Betterleaks{pool: make(chan *detect.Detector, workers)}
 	go func() {
-		defer close(b.ready)
 		for i := 0; i < workers; i++ {
+			cfg := first
+			if i > 0 {
+				next, err := config.Default()
+				if err != nil {
+					return
+				}
+				cfg = next
+			}
 			detector := detect.NewDetectorContext(context.Background(), cfg, detect.ValidationOptions{})
 			detector.SkipFindingAppend = true
 			b.pool <- detector
@@ -41,11 +48,6 @@ func NewBetterleaks(workers int) (*Betterleaks, error) {
 }
 
 func (b *Betterleaks) acquire(ctx context.Context) (*detect.Detector, error) {
-	select {
-	case <-b.ready:
-	case <-ctx.Done():
-		return nil, ctx.Err()
-	}
 	select {
 	case detector := <-b.pool:
 		return detector, nil

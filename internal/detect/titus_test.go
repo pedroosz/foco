@@ -39,7 +39,11 @@ func TestTitusExcludesNoisyRules(t *testing.T) {
 	}
 	defer engine.Close()
 
-	rules := engine.scanner.Rules()
+	scanner, err := engine.ready(context.Background())
+	if err != nil {
+		t.Fatal(err)
+	}
+	rules := scanner.Rules()
 	if len(rules) == 0 {
 		t.Fatal("expected builtin rules to be loaded")
 	}
