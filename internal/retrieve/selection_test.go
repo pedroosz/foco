@@ -5,11 +5,13 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"strings"
 	"testing"
 
 	"foco/internal/enums"
 	"foco/internal/files"
+	"foco/internal/outline"
 	"foco/internal/provider"
 	"foco/internal/requests"
 )
@@ -144,7 +146,7 @@ func TestBuildWindowsCoversLinesAcrossMidFileGiantLine(t *testing.T) {
 	lines := numberedLines(60)
 	lines[19] = strings.Repeat("x", 30_000)
 	index := newTextIndex(strings.Join(lines, "\n"))
-	windows := buildWindows(index)
+	windows := buildWindows(index, nil)
 	for line := 1; line <= len(index.lines); line++ {
 		covered := false
 		for _, entry := range windows {
@@ -180,7 +182,7 @@ func TestBuildWindowsCoversLinesAcrossMidFileGiantLine(t *testing.T) {
 
 func TestBuildWindowsUsesFixedOverlap(t *testing.T) {
 	index := newTextIndex(strings.Join(numberedLines(100), "\n"))
-	windows := buildWindows(index)
+	windows := buildWindows(index, nil)
 	want := []Range{{StartLine: 1, EndLine: 40}, {StartLine: 31, EndLine: 70}, {StartLine: 61, EndLine: 100}}
 	if len(windows) != len(want) {
 		t.Fatalf("windows = %+v", windows)
@@ -198,7 +200,7 @@ func TestBuildWindowsAdvancesPastRepeatedCapShrunkWindows(t *testing.T) {
 		lines[position] = strings.Repeat("y", 13_000)
 	}
 	index := newTextIndex(strings.Join(lines, "\n"))
-	windows := buildWindows(index)
+	windows := buildWindows(index, nil)
 	if len(windows) != len(lines) {
 		t.Fatalf("windows = %d, want %d: %+v", len(windows), len(lines), windows)
 	}
@@ -416,4 +418,31 @@ func requestAnswer(request provider.Request, id string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+func TestDeclarationWindowsFollowDeclarations(t *testing.T) {
+	source := "package a\n\nimport \"fmt\"\n\nfunc Small() {}\n\nfunc Tiny() {}\n\n" +
+		"func Large() {\n" + strings.Repeat("\tfmt.Println(1)\n", 120) + "}\n\nvar tail = 1\n"
+	index := newTextIndex(source)
+	declarations := outline.Of("a.go", "TestDeclarationWindows", source)
+	if len(declarations) != 3 {
+		t.Skipf("outlines unavailable in this build: %+v", declarations)
+	}
+	windows := buildWindows(index, declarations)
+	names := []string{}
+	covered := map[int]bool{}
+	for _, entry := range windows {
+		names = append(names, fmt.Sprintf("%s %d-%d", entry.Name, entry.Range.StartLine, entry.Range.EndLine))
+		for line := entry.Range.StartLine; line <= entry.Range.EndLine; line++ {
+			covered[line] = true
+		}
+	}
+	if windows[0].Name != "lines 1-4" || windows[1].Name != "func Small(); func Tiny()" || !strings.HasPrefix(windows[2].Name, "func Large() (part)") {
+		t.Fatalf("windows = %v", names)
+	}
+	for line := 1; line <= len(index.lines); line++ {
+		if !covered[line] && strings.TrimSpace(index.lines[line-1]) != "" {
+			t.Fatalf("line %d is in no window: %v", line, names)
+		}
+	}
 }

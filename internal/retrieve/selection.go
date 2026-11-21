@@ -12,6 +12,7 @@ import (
 
 	"foco/internal/enums"
 	"foco/internal/files"
+	"foco/internal/outline"
 	"foco/internal/provider"
 	"foco/internal/requests"
 )
@@ -43,10 +44,19 @@ func backUpRune(data []byte, start, finish int) int {
 	return finish
 }
 
-func buildWindows(index *textIndex) []window {
-	lineCount := len(index.lines)
+// windowsIn cuts lines first..last into overlapping WindowLines-line windows,
+// byte-capped at WindowMaxBytes. label names the windows; empty means
+// "lines a-b".
+func windowsIn(index *textIndex, first, last int, label string) []window {
+	lineCount := last
 	var out []window
-	for start := 1; start <= lineCount; {
+	name := func(start, end int) string {
+		if label != "" {
+			return label
+		}
+		return fmt.Sprintf("lines %d-%d", start, end)
+	}
+	for start := first; start <= lineCount; {
 		end := min(lineCount, start+WindowLines-1)
 		for end > start && index.offsets[end]-index.offsets[start-1] > WindowMaxBytes {
 			end--
@@ -61,14 +71,14 @@ func buildWindows(index *textIndex) []window {
 					finish = min(endByte, position+WindowMaxBytes)
 				}
 				out = append(out, window{
-					Name: fmt.Sprintf("lines %d-%d", start, end), Range: Range{StartLine: start, EndLine: end},
+					Name: name(start, end), Range: Range{StartLine: start, EndLine: end},
 					StartByte: position, EndByte: finish, Partial: true,
 				})
 				position = finish
 			}
 		} else {
 			out = append(out, window{
-				Name: fmt.Sprintf("lines %d-%d", start, end), Range: Range{StartLine: start, EndLine: end},
+				Name: name(start, end), Range: Range{StartLine: start, EndLine: end},
 				StartByte: startByte, EndByte: endByte,
 			})
 		}
@@ -82,6 +92,91 @@ func buildWindows(index *textIndex) []window {
 		} else {
 			start = end - WindowOverlap + 1
 		}
+	}
+	return out
+}
+
+func buildWindows(index *textIndex, declarations []outline.Declaration) []window {
+	if len(declarations) == 0 {
+		return windowsIn(index, 1, len(index.lines), "")
+	}
+	return declarationWindows(index, declarations)
+}
+
+// declarationWindows asks about whole declarations instead of fixed line
+// windows: each function, method or type is one window named by its
+// signature, consecutive small declarations share a window up to
+// WindowLines lines, declarations too large for one window are split into
+// line windows, and source between declarations keeps line windows.
+func declarationWindows(index *textIndex, declarations []outline.Declaration) []window {
+	lineCount := len(index.lines)
+	members := map[int]bool{}
+	for _, declaration := range declarations {
+		if declaration.Container {
+			continue
+		}
+		for _, container := range declarations {
+			if container.Container && container.StartLine <= declaration.StartLine && declaration.EndLine <= container.EndLine {
+				members[container.StartLine*1_000_000+container.EndLine] = true
+			}
+		}
+	}
+	leaves := []outline.Declaration{}
+	for _, declaration := range declarations {
+		if declaration.Container && members[declaration.StartLine*1_000_000+declaration.EndLine] {
+			continue
+		}
+		if declaration.EndLine > lineCount || declaration.StartLine < 1 {
+			continue
+		}
+		if len(leaves) > 0 && declaration.StartLine <= leaves[len(leaves)-1].EndLine {
+			continue
+		}
+		leaves = append(leaves, declaration)
+	}
+	out := []window{}
+	gap := func(first, last int) {
+		if first <= last && !index.blankLines(first, last) {
+			out = append(out, windowsIn(index, first, last, "")...)
+		}
+	}
+	fits := func(first, last int) bool {
+		return last-first+1 <= 2*WindowLines && index.offsets[last]-index.offsets[first-1] <= WindowMaxBytes
+	}
+	cursor := 1
+	for position := 0; position < len(leaves); {
+		first := leaves[position]
+		gap(cursor, first.StartLine-1)
+		if !fits(first.StartLine, first.EndLine) {
+			out = append(out, windowsIn(index, first.StartLine, first.EndLine, first.Label()+" (part)")...)
+			cursor = first.EndLine + 1
+			position++
+			continue
+		}
+		end := first.EndLine
+		labels := []string{first.Label()}
+		next := position + 1
+		for next < len(leaves) && leaves[next].EndLine-first.StartLine+1 <= WindowLines &&
+			index.blankLines(end+1, leaves[next].StartLine-1) && fits(first.StartLine, leaves[next].EndLine) {
+			end = leaves[next].EndLine
+			labels = append(labels, leaves[next].Label())
+			next++
+		}
+		out = append(out, window{
+			Name: joinLabels(labels), Range: Range{StartLine: first.StartLine, EndLine: end},
+			StartByte: index.offsets[first.StartLine-1], EndByte: index.offsets[end],
+		})
+		cursor = end + 1
+		position = next
+	}
+	gap(cursor, lineCount)
+	return out
+}
+
+func joinLabels(labels []string) string {
+	out := strings.Join(labels, "; ")
+	if runes := []rune(out); len(runes) > 240 {
+		out = string(runes[:240]) + "…"
 	}
 	return out
 }
@@ -361,7 +456,7 @@ func selectFile(
 	if prepare != nil {
 		perWindow = 3
 	}
-	groups := groupWindows(index, buildWindows(index), min(SelectionBatchSize, MaxQuestionsPerRequest/perWindow))
+	groups := groupWindows(index, buildWindows(index, outline.Of(snapshot.Path, snapshot.ContentHash, snapshot.Source)), min(SelectionBatchSize, MaxQuestionsPerRequest/perWindow))
 	groupCount := len(groups)
 	queue := append([][]window{}, groups...)
 	selected := []span{}

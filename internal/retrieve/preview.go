@@ -10,6 +10,7 @@ import (
 
 	"foco/internal/enums"
 	"foco/internal/files"
+	"foco/internal/outline"
 	"foco/internal/requests"
 )
 
@@ -110,6 +111,11 @@ func previewFile(snapshot files.Snapshot) *requests.FilePreview {
 		SizeBytes: len(data), Extension: extension(snapshot.Path), Text: text,
 		PreviewBytes: len(text), Truncated: truncated, Range: "opening bytes",
 	}
+	if truncated {
+		if outlined, ok := outlinePreview(snapshot); ok {
+			preview.Text, preview.PreviewBytes, preview.Range = outlined, len(outlined), "opening bytes and declaration outline"
+		}
+	}
 	for {
 		blob, _ := jsonMarshal(preview)
 		if len(blob) <= PreviewJSONBytes {
@@ -133,6 +139,31 @@ func previewFile(snapshot files.Snapshot) *requests.FilePreview {
 // withDirectoryContent samples the file children of a directory item. Reads
 // found in prefetched (keyed by absolute path) are used as is; the rest are
 // read concurrently here.
+// outlinePreview replaces the opening 16 KB of a large file with a shorter
+// opening plus the file's declaration outline: every declaration's line range
+// and signature. The provider sees the whole file's structure in fewer bytes,
+// so navigation judges large files on more than their first lines and more
+// files fit in each navigation request.
+func outlinePreview(snapshot files.Snapshot) (string, bool) {
+	declarations := outline.Of(snapshot.Path, snapshot.ContentHash, snapshot.Source)
+	if len(declarations) == 0 {
+		return "", false
+	}
+	opening := snapshot.Source[:runeStartAtOrBefore(snapshot.Source, OutlineOpeningBytes)]
+	var out strings.Builder
+	out.WriteString(opening)
+	out.WriteString("\n\nDeclaration outline (lines, signature):\n")
+	for _, declaration := range declarations {
+		line := itoa(declaration.StartLine) + "-" + itoa(declaration.EndLine) + " " + declaration.Label() + "\n"
+		if out.Len()+len(line) > PreviewBytes {
+			out.WriteString("…\n")
+			break
+		}
+		out.WriteString(line)
+	}
+	return out.String(), true
+}
+
 func withDirectoryContent(ctx context.Context, reader Reader, item requests.NavigationItem, issue func(enums.RetrievalIssueCode), report func(string, *files.Snapshot), prefetched map[string]files.SnapshotResult) (requests.NavigationItem, []Donor) {
 	if item.ChildPreview == nil {
 		return item, nil

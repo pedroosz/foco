@@ -11,13 +11,15 @@ import (
 )
 
 const (
-	StageWorkers           = 32
-	RelevanceBoundary      = 0.5
-	WeakScoreCeiling       = 0.6
-	MinimumPositiveScores  = 32
-	NavigationByteBudget   = 8_000_000
-	SourceInspectionLimit  = 1_000_000
-	PreviewBytes           = 16_384
+	StageWorkers          = 32
+	RelevanceBoundary     = 0.5
+	WeakScoreCeiling      = 0.6
+	MinimumPositiveScores = 32
+	NavigationByteBudget  = 8_000_000
+	SourceInspectionLimit = 1_000_000
+	PreviewBytes          = 16_384
+	// OutlineOpeningBytes is how much opening source an outlined preview keeps.
+	OutlineOpeningBytes    = 4_096
 	PreviewJSONBytes       = 24_000
 	PreviewSampleJSONBytes = 28_000
 	NavigationBatchSize    = 100
