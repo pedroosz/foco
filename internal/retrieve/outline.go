@@ -200,26 +200,39 @@ func declarationName(name string) string {
 	return name
 }
 
+// evidenceNames indexes the identifiers in every file's selected excerpts,
+// once per search: identifier -> the files using it.
+func evidenceNames(evidence map[string][]Excerpt) map[string]map[string]bool {
+	out := map[string]map[string]bool{}
+	for path, excerpts := range evidence {
+		for _, excerpt := range excerpts {
+			for _, identifier := range identifierPattern.FindAllString(excerpt.Source, -1) {
+				if out[identifier] == nil {
+					out[identifier] = map[string]bool{}
+				}
+				out[identifier][path] = true
+			}
+		}
+	}
+	return out
+}
+
 // referencedWindows returns windows of declarations named in evidence from
 // other files or other declarations of this file, and not yet selected.
 func referencedWindows(
-	snapshot files.Snapshot, file FileEvidence, evidence map[string][]Excerpt,
+	snapshot files.Snapshot, file FileEvidence, names map[string]map[string]bool,
 ) []window {
 	declarations := outline.Of(snapshot.Path, snapshot.ContentHash, snapshot.Source)
 	if len(declarations) == 0 {
 		return nil
 	}
-	used := map[string]bool{}
-	for path, excerpts := range evidence {
-		for _, excerpt := range excerpts {
-			for _, identifier := range identifierPattern.FindAllString(excerpt.Source, -1) {
-				if path != snapshot.Path {
-					used[identifier] = true
-				} else {
-					used["\x00"+identifier] = true
-				}
+	usedElsewhere := func(name string) bool {
+		for path := range names[name] {
+			if path != snapshot.Path {
+				return true
 			}
 		}
+		return false
 	}
 	selected := func(startLine, endLine int) bool {
 		for _, decision := range file.SourceDecisions {
@@ -243,7 +256,7 @@ func referencedWindows(
 			if len(name) < 4 || commonNames[name] {
 				continue
 			}
-			if used[name] || (used["\x00"+name] && !selected(declaration.StartLine, declaration.EndLine)) {
+			if usedElsewhere(name) || (names[name][snapshot.Path] && !selected(declaration.StartLine, declaration.EndLine)) {
 				out = append(out, candidate)
 				break
 			}

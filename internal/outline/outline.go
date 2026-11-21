@@ -36,9 +36,16 @@ const maxSignatureRunes = 160
 
 var (
 	cacheMu sync.Mutex
-	cache   = map[string][]Declaration{}
+	cache   = map[string]*entry{}
 	order   []string
 )
+
+// entry is one cached outline; ready closes once it is parsed, so concurrent
+// callers for the same file wait for one parse instead of each parsing.
+type entry struct {
+	ready chan struct{}
+	value []Declaration
+}
 
 const cacheEntries = 4096
 
@@ -52,9 +59,17 @@ func Of(filePath, contentHash, source string) []Declaration {
 	}
 	key := language.name + "\x00" + contentHash
 	cacheMu.Lock()
-	if out, ok := cache[key]; ok {
+	if found, ok := cache[key]; ok {
 		cacheMu.Unlock()
-		return out
+		<-found.ready
+		return found.value
+	}
+	pending := &entry{ready: make(chan struct{})}
+	cache[key] = pending
+	order = append(order, key)
+	if len(order) > cacheEntries {
+		delete(cache, order[0])
+		order = order[1:]
 	}
 	cacheMu.Unlock()
 	out := parse(language, []byte(source))
@@ -64,16 +79,8 @@ func Of(filePath, contentHash, source string) []Declaration {
 		}
 		return out[i].EndLine > out[j].EndLine
 	})
-	cacheMu.Lock()
-	if _, ok := cache[key]; !ok {
-		cache[key] = out
-		order = append(order, key)
-		if len(order) > cacheEntries {
-			delete(cache, order[0])
-			order = order[1:]
-		}
-	}
-	cacheMu.Unlock()
+	pending.value = out
+	close(pending.ready)
 	return out
 }
 

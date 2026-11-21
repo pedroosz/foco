@@ -466,6 +466,7 @@ func resolveReferences(ctx context.Context, reader Reader, root string, ordered 
 			evidence[path] = file.Excerpts
 		}
 	}
+	names := evidenceNames(evidence)
 	for index, entry := range ordered {
 		file, ok := filesByPath[entry.Path]
 		if !outlined[index] || !ok || file.SourceOmitted {
@@ -477,7 +478,7 @@ func resolveReferences(ctx context.Context, reader Reader, root string, ordered 
 		}
 		snapshot := *read.Snapshot
 		snapshot.Path = entry.Path
-		if updated, changed := withReferences(ctx, snapshot, file, referencedWindows(snapshot, file, evidence)); changed {
+		if updated, changed := withReferences(ctx, snapshot, file, referencedWindows(snapshot, file, names)); changed {
 			filesByPath[entry.Path] = updated
 		}
 	}
