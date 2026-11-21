@@ -47,6 +47,8 @@ func TestCredentialsIgnoresOrdinaryCode(t *testing.T) {
 		{"tox.ini", "postgres: -rtests/requirements/postgres.txt\n"},
 		{"a.json", `{"Unexpected_token_1012": "予期しないトークンです。"}`},
 		{"a.py", `FineTuningAPIKey.REPORTS: "reports:disabled-organizations"`},
+		{"a.py", `{"store.background-grouping-config-id": "mobile:2021-02-12"}`},
+		{"a.py", `{"bootstrap.servers": "my.server:9092"}`},
 	} {
 		if match := credentialMatch(c.path, c.text); match != "" {
 			t.Errorf("false positive %q in %s", match, c.text)
@@ -86,4 +88,32 @@ func TestCredentialsCorpusReport(t *testing.T) {
 		})
 	}
 	t.Logf("files=%d flagged=%d", files, hits)
+}
+
+func BenchmarkCredentialRules(b *testing.B) {
+	path := os.Getenv("FOCO_CREDENTIALS_BENCH_FILE")
+	if path == "" {
+		b.Skip("set FOCO_CREDENTIALS_BENCH_FILE")
+	}
+	data, err := os.ReadFile(path)
+	if err != nil {
+		b.Fatal(err)
+	}
+	text := string(data)
+	for _, rule := range []struct {
+		name string
+		run  func()
+	}{
+		{"aws", func() { awsKeyIDIn(text) }},
+		{"keyed", func() { keyedValueIn(text, false) }},
+		{"host", func() { hostCredentialIn(text) }},
+		{"all", func() { credentialMatch(path, text) }},
+	} {
+		b.Run(rule.name, func(b *testing.B) {
+			b.SetBytes(int64(len(data)))
+			for range b.N {
+				rule.run()
+			}
+		})
+	}
 }
