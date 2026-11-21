@@ -65,6 +65,8 @@ Search options:
   --parallel N            CPU cores to use; 0 means all (default: half)
   --nav-batch-size N      Max paths per navigation request, 1–100 (default: 100)
   --nav-batch-bytes N     Max navigation request bytes, 38000–64000 (default: 38000)
+  --pipeline NAME         classic, or outline: ask about whole declarations and
+                          fold role questions into selection (default: classic)
 
 File categories: code, config, docs, data, audio, video, archives, logs, temp, unknown. Classification uses filenames;
 extensionless scripts with a recognised code shebang (Python, Node, Bun, tsx,

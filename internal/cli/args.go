@@ -56,6 +56,7 @@ type SearchOptions struct {
 	Concurrency    int
 	Parallel       int
 	NavBatchSize   int
+	Pipeline       string
 	NavBatchBytes  int
 	MaxRequests    int
 	MaxSourceBytes int64
@@ -129,7 +130,7 @@ func isVersionToken(arg string) bool { return arg == "--version" || arg == "-v" 
 // another flag, matching the way pflag consumes a following token.
 var valueFlagNames = map[string]bool{
 	"schema": true, "endpoint": true, "model": true, "agent": true,
-	"concurrency": true, "parallel": true, "nav-batch-size": true, "nav-batch-bytes": true, "max-requests": true, "max-source-bytes": true,
+	"concurrency": true, "parallel": true, "nav-batch-size": true, "nav-batch-bytes": true, "pipeline": true, "max-requests": true, "max-source-bytes": true,
 	"max-output-bytes": true, "exclude": true, "only": true, "exclude-types": true,
 }
 
@@ -175,6 +176,7 @@ func newRootCommand(target *Command) *cobra.Command {
 	flags.String("concurrency", "", "")
 	flags.String("parallel", "", "")
 	flags.String("nav-batch-size", "", "")
+	flags.String("pipeline", "", "")
 	flags.String("nav-batch-bytes", "", "")
 	flags.String("max-requests", "", "")
 	flags.String("max-source-bytes", "", "")
@@ -278,7 +280,7 @@ func searchRaw(cmd *cobra.Command, positionals []string) rawArgs {
 	} {
 		collectBool(&raw, cmd, name)
 	}
-	for _, name := range []string{"concurrency", "parallel", "nav-batch-size", "nav-batch-bytes", "max-requests", "max-source-bytes", "max-output-bytes"} {
+	for _, name := range []string{"concurrency", "parallel", "nav-batch-size", "nav-batch-bytes", "pipeline", "max-requests", "max-source-bytes", "max-output-bytes"} {
 		collectString(&raw, cmd, name)
 	}
 	for _, name := range []string{"exclude", "only", "exclude-types"} {
@@ -377,7 +379,7 @@ func parseSearch(raw rawArgs) (Command, error) {
 		return Command{}, usageError(`Usage: foco "question" [root]. Run foco --help.`)
 	}
 	for key := range raw.values {
-		if !isPolicyFlag(key) && key != "no-cache" && key != "concurrency" && key != "parallel" && key != "nav-batch-size" && key != "nav-batch-bytes" && key != "max-requests" &&
+		if !isPolicyFlag(key) && key != "no-cache" && key != "concurrency" && key != "parallel" && key != "nav-batch-size" && key != "nav-batch-bytes" && key != "pipeline" && key != "max-requests" &&
 			key != "max-source-bytes" && key != "max-output-bytes" && key != "no-locations" {
 			return Command{}, usageError(`Usage: foco "question" [root]. Run foco --help.`)
 		}
@@ -406,6 +408,15 @@ func parseSearch(raw rawArgs) (Command, error) {
 		search.Parallel = int(value)
 		if search.Parallel == 0 {
 			search.Parallel = runtime.NumCPU()
+		}
+	}
+	search.Pipeline = "classic"
+	if raw.has("pipeline") {
+		switch value := raw.one("pipeline"); value {
+		case "classic", "outline":
+			search.Pipeline = value
+		default:
+			return Command{}, usageError("--pipeline must be classic or outline.")
 		}
 	}
 	if raw.has("nav-batch-size") {

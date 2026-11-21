@@ -73,7 +73,7 @@ var errPrefetched = errors.New("prefetched")
 // only on the query, the path and the file content, so they can be sent while
 // discovery is still waiting on navigation, using concurrency it leaves idle.
 // The final passes then build identical requests and get memoized answers.
-func startCandidatePrefetch(ctx context.Context, evaluator Evaluator, reader Reader, query string, discovery *discoveryState) func() {
+func startCandidatePrefetch(ctx context.Context, evaluator Evaluator, reader Reader, query string, discovery *discoveryState, outlineMode bool) func() {
 	source, ok := evaluator.(prefetcher)
 	if !ok {
 		return func() {}
@@ -89,18 +89,33 @@ func startCandidatePrefetch(ctx context.Context, evaluator Evaluator, reader Rea
 	}
 	queue := []job{}
 	active := 0
-	work := func(next job) {
-		if next.assess {
-			_, _ = assessFile(child, warm, query, candidate{Path: next.path}, next.preview)
-			return
-		}
-		relative := next.path
+	read := func(relative string) (files.Snapshot, bool) {
 		result := reader.ReadSnapshotReuse(child, absPath(reader.Root(), relative))
 		if result.Status != enums.SnapshotStatusSnapshot || result.Snapshot == nil {
-			return
+			return files.Snapshot{}, false
 		}
 		snapshot := *result.Snapshot
 		snapshot.Path = relative
+		return snapshot, true
+	}
+	work := func(next job) {
+		if next.assess {
+			if outlineMode {
+				if snapshot, ok := read(next.path); ok && outlinable(snapshot) {
+					return
+				}
+			}
+			_, _ = assessFile(child, warm, query, candidate{Path: next.path}, next.preview)
+			return
+		}
+		snapshot, ok := read(next.path)
+		if !ok {
+			return
+		}
+		if outlineMode && outlinable(snapshot) {
+			_, _, _, _ = outlineFile(child, snapshot, query, 0, prefetchThenEvaluate{warm: source, inner: evaluator}, warm, nil)
+			return
+		}
 		_, _ = selectFile(child, snapshot, query, 0, warm, nil, nil)
 	}
 	// A fixed pool of StageWorkers drains the admitted paths, so a repository

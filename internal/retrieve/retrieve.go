@@ -18,6 +18,8 @@ var errSourceInvalid = errors.New("source invalid")
 type Input struct {
 	Query    string
 	Progress func(ProgressSnapshot)
+	// Pipeline is PipelineClassic (the default) or PipelineOutline.
+	Pipeline string
 	// NavigationBatchSize and NavigationBatchBytes cap the items and the
 	// serialized size of one navigation request; zero means the default.
 	NavigationBatchSize  int
@@ -88,6 +90,7 @@ func Run(ctx context.Context, input Input, evaluator Evaluator, reader Reader) (
 		Pruned: map[string]requests.NavigationItem{}, Previews: map[string]*requests.FilePreview{},
 		Donors: map[string][]Donor{},
 	}
+	outlineMode := input.Pipeline == PipelineOutline
 	navigator := newNavigator(ctx, input.Query, evaluator, state.issues, func(item requests.NavigationItem) []Donor {
 		return discovery.Donors[item.Path]
 	}, state.validate, func(ctx context.Context, relative string) probeOutcome {
@@ -98,7 +101,13 @@ func Run(ctx context.Context, input Input, evaluator Evaluator, reader Reader) (
 		if snapshot == nil {
 			return probeOutcome{}
 		}
-		result, err := selectFile(ctx, *snapshot, input.Query, WeakScoreCeiling, evaluator, nil, nil)
+		var result selectionResult
+		var err error
+		if outlineMode && outlinable(*snapshot) {
+			result, _, _, err = outlineFile(ctx, *snapshot, input.Query, WeakScoreCeiling, evaluator, evaluator, nil)
+		} else {
+			result, err = selectFile(ctx, *snapshot, input.Query, WeakScoreCeiling, evaluator, nil, nil)
+		}
 		if err != nil {
 			return probeOutcome{}
 		}
@@ -117,7 +126,7 @@ func Run(ctx context.Context, input Input, evaluator Evaluator, reader Reader) (
 	if input.NavigationBatchBytes > 0 {
 		navigator.batchBytes = input.NavigationBatchBytes
 	}
-	stopPrefetch := startCandidatePrefetch(ctx, evaluator, reader, input.Query, discovery)
+	stopPrefetch := startCandidatePrefetch(ctx, evaluator, reader, input.Query, discovery, outlineMode)
 	defer stopPrefetch()
 	if err := discover(ctx, state.root, reader, input.Query, []string{"."}, nil, navigator, state.issues.add, state.issues.fatal, state.report, discovery); err != nil {
 		return RetrievalResult{}, err
@@ -151,13 +160,31 @@ func Run(ctx context.Context, input Input, evaluator Evaluator, reader Reader) (
 				if ctx.Err() != nil || state.issues.fatal() {
 					return
 				}
+				if outlineMode {
+					if read := reader.ReadSnapshotReuse(ctx, absPath(state.root, entry.Path)); read.Snapshot != nil {
+						snapshot := *read.Snapshot
+						snapshot.Path = entry.Path
+						if outlinable(snapshot) {
+							return
+						}
+					}
+				}
 				result, failure := assessFile(ctx, evaluator, input.Query, entry, discovery.Previews[entry.Path])
 				assessed[index] = assessmentOutcome{result: &result, failure: failure}
 			})
 		}()
 	}
+	outlineRoles := make([]*assessment, len(ordered))
+	outlined := make([]bool, len(ordered))
 	mergeAssessments := func() {
 		assessing.Wait()
+		defer func() {
+			for index, entry := range ordered {
+				if outlineRoles[index] != nil {
+					assessments[entry.Path] = *outlineRoles[index]
+				}
+			}
+		}()
 		for index, entry := range ordered {
 			if assessed == nil {
 				break
@@ -220,6 +247,21 @@ func Run(ctx context.Context, input Input, evaluator Evaluator, reader Reader) (
 				}
 				return nil
 			}
+			if outlineMode && outlinable(*snapshot) {
+				outlined[index] = true
+				if evidence != nil {
+					return
+				}
+				result, roles, _, err := outlineFile(ctx, *snapshot, input.Query, entry.Score, evaluator, evaluator, validate)
+				if err != nil {
+					if ctx.Err() == nil {
+						outcomes[index].failure = asFailure(err)
+					}
+					return
+				}
+				outcomes[index].result, outlineRoles[index] = &result, roles
+				return
+			}
 			result, err := selectFile(ctx, *snapshot, input.Query, entry.Score, evaluator, prepare, validate)
 			if err != nil {
 				if ctx.Err() == nil {
@@ -256,6 +298,9 @@ func Run(ctx context.Context, input Input, evaluator Evaluator, reader Reader) (
 	// starts, so its selection outcomes are discarded.
 	if !state.issues.fatal() {
 		mergeSelection(first)
+		if outlineMode && ctx.Err() == nil {
+			resolveReferences(ctx, reader, state.root, ordered, outlined, filesByPath)
+		}
 	}
 	evidence := []requests.Evidence{}
 	if !state.issues.fatal() && ctx.Err() == nil {
@@ -409,6 +454,32 @@ func mergeSelectionIssues(issues *issueSet, result selectionResult) {
 	}
 	if result.ProviderFailure != "" && issues.providerFailure == "" {
 		issues.providerFailure = result.ProviderFailure
+	}
+}
+
+// resolveReferences adds locally resolved references to outlined files, in
+// place of the provider's evidence pass.
+func resolveReferences(ctx context.Context, reader Reader, root string, ordered []candidate, outlined []bool, filesByPath map[string]FileEvidence) {
+	evidence := map[string][]Excerpt{}
+	for path, file := range filesByPath {
+		if len(file.Excerpts) > 0 {
+			evidence[path] = file.Excerpts
+		}
+	}
+	for index, entry := range ordered {
+		file, ok := filesByPath[entry.Path]
+		if !outlined[index] || !ok || file.SourceOmitted {
+			continue
+		}
+		read := reader.ReadSnapshotReuse(ctx, absPath(root, entry.Path))
+		if read.Snapshot == nil || read.Snapshot.ContentHash != file.ContentHash {
+			continue
+		}
+		snapshot := *read.Snapshot
+		snapshot.Path = entry.Path
+		if updated, changed := withReferences(ctx, snapshot, file, referencedWindows(snapshot, file, evidence)); changed {
+			filesByPath[entry.Path] = updated
+		}
 	}
 }
 

@@ -620,6 +620,94 @@ func TestNoRequestExceedsTheQuestionLimit(t *testing.T) {
 	}
 }
 
+func TestOutlinePipelineFoldsRolesAndSendsOnlyChosenBodies(t *testing.T) {
+	root := t.TempDir()
+	writeRetrieveFile(t, root, "small.go", "package a\n\nfunc Handler() int { return ParseConfigFile() }\n")
+	large := "package a\n\nfunc ParseConfigFile() int {\n\treturn 1\n}\n\n"
+	for index := range 40 {
+		large += "func Unrelated" + itoa(index) + "() {\n" + strings.Repeat("\t_ = \"filler line\"\n", 30) + "}\n\n"
+	}
+	writeRetrieveFile(t, root, "large.go", large)
+	reader, err := files.New(root, files.DefaultPolicy(), nil, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer reader.Close()
+	var mu sync.Mutex
+	assessments, outlines := 0, 0
+	sentLarge := []string{}
+	evaluator := &scriptedEvaluator{answers: func(request provider.Request) (map[string]float64, error) {
+		out := map[string]float64{}
+		for _, question := range request.Questions {
+			out[question.ID] = 0.1
+		}
+		switch state := request.State.(type) {
+		case requests.NavigationRequestState:
+			for index := range state.Items {
+				out["q"+itoa(index)] = 0.9
+			}
+		case requests.AssessmentState:
+			mu.Lock()
+			assessments++
+			mu.Unlock()
+		case requests.OutlineState:
+			mu.Lock()
+			outlines++
+			mu.Unlock()
+			for index, declaration := range state.Declarations {
+				if strings.Contains(declaration.Name, "Unrelated1") {
+					out["d"+itoa(index)] = 0.9
+				}
+			}
+			out["implementation"], out["priority"] = 0.9, 0.8
+		case requests.EvidenceState:
+			if state.Path == "large.go" {
+				mu.Lock()
+				sentLarge = append(sentLarge, state.Source)
+				mu.Unlock()
+			}
+			for index, declaration := range state.Declarations {
+				value := 0.2
+				if strings.Contains(declaration.Name, "Handler") || strings.Contains(declaration.Name, "Unrelated1()") {
+					value = 0.9
+				}
+				out["q"+itoa(index)], out["scope"+itoa(index)] = value, value
+			}
+			out["implementation"], out["priority"] = 0.9, 0.7
+		}
+		return out, nil
+	}}
+	result, err := Run(context.Background(), Input{Query: "handler", Pipeline: PipelineOutline}, evaluator, reader)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if outlines == 0 {
+		t.Skip("outlines unavailable in this build")
+	}
+	if assessments != 0 {
+		t.Fatalf("assessment requests = %d, want 0 (roles ride on selection)", assessments)
+	}
+	byPath := map[string]FileEvidence{}
+	for _, file := range result.Files {
+		byPath[file.Path] = file
+	}
+	if file := byPath["small.go"]; len(file.Roles) == 0 || file.Priority == nil {
+		t.Fatalf("small.go roles = %+v", file)
+	}
+	for _, source := range sentLarge {
+		if strings.Contains(source, "func Unrelated20()") {
+			t.Fatalf("an unchosen body was sent: %.200s", source)
+		}
+	}
+	shown := ""
+	for _, excerpt := range byPath["large.go"].Excerpts {
+		shown += excerpt.Source
+	}
+	if !strings.Contains(shown, "func Unrelated1()") || !strings.Contains(shown, "func ParseConfigFile()") {
+		t.Fatalf("large.go excerpts miss the chosen body or the locally resolved reference:\n%s", shown)
+	}
+}
+
 func writeRetrieveFile(t *testing.T, root, relative, source string) {
 	t.Helper()
 	absolute := filepath.Join(root, filepath.FromSlash(relative))

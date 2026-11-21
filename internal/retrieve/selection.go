@@ -181,23 +181,56 @@ func joinLabels(labels []string) string {
 	return out
 }
 
-func groupWindows(index *textIndex, windows []window, limit int) [][]window {
+func groupWindows(index *textIndex, windows []window, limit int, sparse bool) [][]window {
 	var groups [][]window
 	current := []window{}
+	sum := 0
 	for _, entry := range windows {
 		if len(current) > 0 {
 			byteLength := index.offsets[entry.Range.EndLine] - index.offsets[current[0].Range.StartLine-1]
+			if sparse {
+				byteLength = sum + entry.EndByte - entry.StartByte
+			}
 			if len(current) >= limit || byteLength > SelectionGroupSourceBytes {
 				groups = append(groups, current)
 				current = []window{}
+				sum = 0
 			}
 		}
 		current = append(current, entry)
+		sum += entry.EndByte - entry.StartByte
 	}
 	if len(current) > 0 {
 		groups = append(groups, current)
 	}
 	return groups
+}
+
+// sparseContextFor shows only the group's own windows (plus the file's
+// opening lines), for groups of non-adjacent declarations, where the
+// contiguous context would resend everything between them.
+func sparseContextFor(index *textIndex, group []window) string {
+	if len(index.bytes) <= WholeFileContextBytes {
+		return index.source
+	}
+	parts := []string{"Opening context:\n" + strings.Join(index.lines[:min(20, len(index.lines))], "\n")}
+	for _, entry := range group {
+		parts = append(parts, fmt.Sprintf("Source lines %d-%d:\n%s",
+			entry.Range.StartLine, entry.Range.EndLine, string(index.bytes[entry.StartByte:entry.EndByte])))
+	}
+	return strings.Join(parts, "\n")
+}
+
+// selectOptions adjust selectFile for the outline pipeline.
+type selectOptions struct {
+	// windows replaces the file's own windows; an empty non-nil slice asks nothing.
+	windows []window
+	// sparse sends each group's windows instead of a contiguous source range.
+	sparse bool
+	// extra questions ride on the file's first request; extraAnswers receives
+	// that request's answers.
+	extra        []provider.Question
+	extraAnswers *map[string]float64
 }
 
 func contextFor(index *textIndex, group []window) string {
@@ -440,6 +473,19 @@ func selectFile(
 	prepare func(context.Context) ([]requests.Evidence, bool, error),
 	validate func(context.Context) error,
 ) (selectionResult, error) {
+	return selectFileWith(ctx, snapshot, query, score, evaluator, prepare, validate, nil)
+}
+
+func selectFileWith(
+	ctx context.Context, snapshot files.Snapshot, query string, score float64,
+	evaluator Evaluator,
+	prepare func(context.Context) ([]requests.Evidence, bool, error),
+	validate func(context.Context) error,
+	options *selectOptions,
+) (selectionResult, error) {
+	if options == nil {
+		options = &selectOptions{}
+	}
 	issues := &issueSet{counts: map[enums.RetrievalIssueCode]int{}}
 	base := FileEvidence{
 		Path: snapshot.Path, ContentHash: snapshot.ContentHash, Score: score,
@@ -456,7 +502,15 @@ func selectFile(
 	if prepare != nil {
 		perWindow = 3
 	}
-	groups := groupWindows(index, buildWindows(index, outline.Of(snapshot.Path, snapshot.ContentHash, snapshot.Source)), min(SelectionBatchSize, MaxQuestionsPerRequest/perWindow))
+	windows := options.windows
+	if windows == nil {
+		windows = buildWindows(index, outline.Of(snapshot.Path, snapshot.ContentHash, snapshot.Source))
+	}
+	groups := groupWindows(index, windows, min(SelectionBatchSize, (MaxQuestionsPerRequest-len(options.extra))/perWindow), options.sparse)
+	contextOf := contextFor
+	if options.sparse {
+		contextOf = sparseContextFor
+	}
 	groupCount := len(groups)
 	queue := append([][]window{}, groups...)
 	selected := []span{}
@@ -508,12 +562,12 @@ func selectFile(
 		if present && len(evidence) > 0 {
 			evidencePointer = &evidence
 		}
-		request := requests.EvidenceRequest(query, snapshot.Path, contextFor(index, group), declarationsFor(group), evidencePointer)
+		request := requests.EvidenceRequest(query, snapshot.Path, contextOf(index, group), declarationsFor(group), evidencePointer)
 		// Split an oversized group only when a single window would fit: when the
 		// shared parts (evidence, opening context) alone exceed the budget,
 		// splitting multiplies requests without making any of them fit.
 		if len(group) > 1 && stateSize(request.State) > SelectionStateBytes &&
-			stateSize(requests.EvidenceRequest(query, snapshot.Path, contextFor(index, group[:1]), declarationsFor(group[:1]), evidencePointer).State) <= SelectionStateBytes {
+			stateSize(requests.EvidenceRequest(query, snapshot.Path, contextOf(index, group[:1]), declarationsFor(group[:1]), evidencePointer).State) <= SelectionStateBytes {
 			middle := (len(group) + 1) / 2
 			queue = append([][]window{group[:middle], group[middle:]}, queue...)
 			groupCount++
@@ -529,6 +583,9 @@ func selectFile(
 				omitted = true
 				break
 			}
+		}
+		if len(jobs) == 0 && len(options.extra) > 0 {
+			request.Questions = append(request.Questions, options.extra...)
 		}
 		jobs = append(jobs, job{group: group, request: request, evidence: evidencePointer})
 	}
@@ -546,6 +603,9 @@ func selectFile(
 			}()
 		}
 		wait.Wait()
+	}
+	if options.extraAnswers != nil && len(jobs) > 0 && failed[0] == nil {
+		*options.extraAnswers = answered[0]
 	}
 	for position, current := range jobs {
 		group := current.group

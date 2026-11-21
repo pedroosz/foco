@@ -66,7 +66,7 @@ func runSearch(ctx context.Context, opts SearchOptions, stdout, stderr io.Writer
 	defer progress.Done()
 	result, err := retrieve.Run(ctx, retrieve.Input{
 		Query: opts.Query, Progress: progress.Update,
-		NavigationBatchSize: opts.NavBatchSize, NavigationBatchBytes: opts.NavBatchBytes,
+		NavigationBatchSize: opts.NavBatchSize, NavigationBatchBytes: opts.NavBatchBytes, Pipeline: opts.Pipeline,
 	}, client, reader)
 	return finishSearch(result, err, opts, stdout, progress)
 }

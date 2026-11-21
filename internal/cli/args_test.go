@@ -179,6 +179,7 @@ func TestUsageMessagesMatchUpstream(t *testing.T) {
 		{[]string{"q", "--nav-batch-size", "0"}, "--nav-batch-size must be an integer from 1 to 100."},
 		{[]string{"q", "--nav-batch-bytes", "37999"}, "--nav-batch-bytes must be an integer from 38000 to 64000."},
 		{[]string{"q", "--nav-batch-size", "101"}, "--nav-batch-size must be an integer from 1 to 100."},
+		{[]string{"q", "--pipeline", "fast"}, "--pipeline must be classic or outline."},
 		{[]string{"q", "--max-requests", "0"}, "--max-requests must be a positive integer."},
 		{[]string{"q", "--max-requests", "1e2"}, "--max-requests must be a positive integer."},
 		{[]string{"q", "--max-source-bytes=-1"}, "--max-source-bytes must be a nonnegative integer (0 means unlimited)."},
